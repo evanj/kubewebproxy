@@ -14,7 +14,6 @@ import (
 
 const portEnvVar = "PORT"
 const defaultPort = "8080"
-const audienceEnvVar = "AUDIENCE"
 
 type server struct {
 	clientset *kubernetes.Clientset
@@ -52,8 +51,8 @@ func (s *server) rootHandler(w http.ResponseWriter, r *http.Request) {
 
 	// sort on the (namespace, name) pair
 	sort.Slice(services.Items, func(i, j int) bool {
-		if services.Items[i].Namespace != services.Items[i].Namespace {
-			return services.Items[i].Namespace < services.Items[i].Namespace
+		if services.Items[i].Namespace != services.Items[j].Namespace {
+			return services.Items[i].Namespace < services.Items[j].Namespace
 		}
 		return services.Items[i].Name < services.Items[j].Name
 	})
