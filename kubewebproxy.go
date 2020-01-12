@@ -1,12 +1,22 @@
 package main
 
 import (
+	"fmt"
 	"html/template"
+	"io"
 	"log"
+	"mime"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
+	"regexp"
 	"sort"
 
+	"golang.org/x/net/html"
+	"golang.org/x/net/html/atom"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -14,14 +24,33 @@ import (
 
 const portEnvVar = "PORT"
 const defaultPort = "8080"
+const htmlMediaType = "text/html"
+
+var servicePattern = regexp.MustCompile(`^/([^/]+)/([^/]+)(.*)$`)
+
+type serviceInfo interface {
+	list(limit int64) (*corev1.ServiceList, error)
+	get(namespace string, name string) (*corev1.Service, error)
+}
+
+type kubernetesAPIClient struct {
+	clientset *kubernetes.Clientset
+}
+
+func (k *kubernetesAPIClient) list(limit int64) (*corev1.ServiceList, error) {
+	return k.clientset.CoreV1().Services("").List(metav1.ListOptions{Limit: limit})
+}
+func (k *kubernetesAPIClient) get(namespace string, name string) (*corev1.Service, error) {
+	return k.clientset.CoreV1().Services(namespace).Get(name, metav1.GetOptions{})
+}
 
 type server struct {
-	clientset *kubernetes.Clientset
+	services serviceInfo
 }
 
 func (s *server) checkPermissions() error {
 	// attempt to list a single service to see if we have permission
-	_, err := s.clientset.CoreV1().Services("").List(metav1.ListOptions{Limit: 1})
+	_, err := s.services.list(1)
 	return err
 }
 
@@ -43,7 +72,7 @@ func (s *server) rootHandler(w http.ResponseWriter, r *http.Request) {
 
 	// get services in all the namespaces by omitting namespace
 	// Or specify namespace to get pods in particular namespace
-	services, err := s.clientset.CoreV1().Services("").List(metav1.ListOptions{})
+	services, err := s.services.list(0)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -80,6 +109,145 @@ func (s *server) rootHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// proxies a request
+func (s *server) proxyErrWrapper(w http.ResponseWriter, r *http.Request) {
+	log.Printf("proxy %s %s", r.Method, r.URL.String())
+	if r.Method != http.MethodGet {
+		http.Error(w, "wrong method", http.StatusMethodNotAllowed)
+		return
+	}
+	err := s.proxy(w, r)
+	if err != nil {
+		log.Printf("WTF %s", err)
+		if errors.IsNotFound(err) {
+			http.NotFound(w, r)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	}
+}
+
+func firstTCPPort(s *corev1.Service) (corev1.ServicePort, bool) {
+	for _, p := range s.Spec.Ports {
+		if p.Protocol == corev1.ProtocolTCP {
+			return p, true
+		}
+	}
+	return corev1.ServicePort{}, false
+}
+
+func (s *server) proxy(w http.ResponseWriter, r *http.Request) error {
+	matches := servicePattern.FindStringSubmatch(r.URL.Path)
+	if len(matches) != 4 {
+		return fmt.Errorf("bad path: %s", r.URL.Path)
+	}
+	namespace, service, path := matches[1], matches[2], matches[3]
+	log.Printf("ns=%s service=%s path=%s", namespace, service, path)
+
+	serviceMeta, err := s.services.get(namespace, service)
+	log.Printf("x, %s %s", serviceMeta, err)
+	if err != nil {
+		return err
+	}
+	log.Printf("1, %s", serviceMeta)
+
+	tcpPort, ok := firstTCPPort(serviceMeta)
+	if !ok {
+		return fmt.Errorf("no TCP ports found")
+	}
+
+	urlString := fmt.Sprintf("http://%s:%d%s", serviceMeta.Spec.ClusterIP, tcpPort.Port, path)
+	log.Printf("proxying to %s", urlString)
+	// TODO: use httputil.ReverseProxy?
+	outR, err := http.NewRequest(http.MethodGet, urlString, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(outR)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	// copy out the headers and status code
+	for k, vList := range resp.Header {
+		for _, v := range vList {
+			w.Header().Set(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+
+	// TODO: check params for charset
+	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil {
+		log.Printf("warning: could not parse Content-Type: %s = %s", resp.Header.Get("Content-Type"), err.Error())
+	}
+	if mediaType == htmlMediaType {
+		// rewrite links so they work
+		// TODO: it would be better to use a wildcard domain to put the namespace/service name
+		// into the incoming URL, since relative links would then "just work" without rewriting.
+		// However, Google Cloud Ingress's automatic TLS certificates do not support wildcard domains,
+		// so let's write a bit more code to make this easier to use
+		pathPrefix := fmt.Sprintf("/%s/%s", namespace, service)
+		log.Printf("rewriting relative URLs to add %s", pathPrefix)
+		err = rewriteRelativeLinks(w, resp.Body, pathPrefix)
+	} else {
+		// not text/html: pass through
+		_, err = io.Copy(w, resp.Body)
+	}
+	if err != nil {
+		return err
+	}
+	return resp.Body.Close()
+}
+
+func rewriteURL(urlString string, pathPrefix string) string {
+	u, err := url.Parse(urlString)
+	if err != nil {
+		log.Printf("warning: skipping invalid URL: %s: %s", urlString, err.Error())
+		return urlString
+	}
+	// this is NOT equivalent to ResolveReference since we want to prepend the path
+	if u.IsAbs() {
+		return urlString
+	}
+	origPath := u.Path
+	u.Path = path.Join(pathPrefix, u.Path)
+	// ensure we keep the same trailing slashes
+	if origPath[len(origPath)-1] == '/' && u.Path[len(u.Path)-1] != '/' {
+		u.Path += "/"
+	}
+	return u.String()
+}
+
+// Rewrites all relative links in the HTML document in r to start with pathPrefix.
+func rewriteRelativeLinks(w io.Writer, r io.Reader, pathPrefix string) error {
+	tokenizer := html.NewTokenizer(r)
+	for {
+		tokenType := tokenizer.Next()
+		if tokenType == html.ErrorToken {
+			if tokenizer.Err() == io.EOF {
+				break
+			}
+			return tokenizer.Err()
+		}
+		t := tokenizer.Token()
+		if t.DataAtom == atom.A {
+			for i, attr := range t.Attr {
+				if attr.Key == "href" {
+					t.Attr[i].Val = rewriteURL(attr.Val, pathPrefix)
+				}
+			}
+		}
+
+		_, err := w.Write([]byte(t.String()))
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func main() {
 	// creates the in-cluster config
 	config, err := rest.InClusterConfig()
@@ -95,7 +263,7 @@ func main() {
 	// crash early if we do not have the correct permission
 	// TODO: This is probably bad: we will crash on startup if the master is down, but it
 	// does make it easier to debug permissions errors. Figure out a better option?
-	s := &server{clientset}
+	s := &server{&kubernetesAPIClient{clientset}}
 	err = s.checkPermissions()
 	if err != nil {
 		panic(err)
@@ -127,7 +295,9 @@ type namespaceTemplateData struct {
 }
 
 type serviceTemplateData struct {
-	Name string
+	Name         string
+	ClusterIP    string
+	FirstTCPPort int
 }
 
 var rootTemplate = template.Must(template.New("root").Parse(`<!doctype html>
@@ -142,7 +312,7 @@ var rootTemplate = template.Must(template.New("root").Parse(`<!doctype html>
 <h2>Namespace {{.Name}}</h2>
 <ul>
 {{range .Services}}
-<li>{{.Name}}</li>
+<li>{{.Name}} (IP: {{.ClusterIP}} TCP Port: {{.FirstTCPPort}}</li>
 {{end}}
 </ul>
 {{end}}

@@ -65,7 +65,7 @@ spec:
       serviceAccountName: kubewebproxy
       containers:
       - name: kubewebproxy
-        image: us.gcr.io/gosignin-demo/kubewebproxy:debug1
+        image: us.gcr.io/gosignin-demo/kubewebproxy:debug2
 
         resources:
           requests:
