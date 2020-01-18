@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"html/template"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"regexp"
 	"sort"
 
+	"github.com/evanj/googlesignin/iap"
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
 	corev1 "k8s.io/api/core/v1"
@@ -54,8 +56,16 @@ func (s *server) checkPermissions() error {
 	return err
 }
 
+func (s *server) healthHandler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("health check URL=%s RemoteAddr=%s UserAgent=%s",
+		r.URL.String(), r.RemoteAddr, r.UserAgent())
+	w.Header().Set("Content-Type", "text/plain;charset=utf-8")
+	w.Write([]byte("ok\n"))
+}
+
 func (s *server) rootHandler(w http.ResponseWriter, r *http.Request) {
-	log.Printf("rootHandler %s %s", r.Method, r.URL.String())
+	email := iap.Email(r)
+	log.Printf("rootHandler user=%s %s %s", email, r.Method, r.URL.String())
 	if r.Method != http.MethodGet {
 		http.Error(w, "wrong method", http.StatusMethodNotAllowed)
 		return
@@ -64,11 +74,6 @@ func (s *server) rootHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-
-	// ns := namespaceTemplateData{"example_namespace", []serviceTemplateData{{"example_service"}}}
-	// data := &rootTemplateData{
-	// 	[]namespaceTemplateData{ns},
-	// }
 
 	// get services in all the namespaces by omitting namespace
 	// Or specify namespace to get pods in particular namespace
@@ -248,13 +253,23 @@ func rewriteRelativeLinks(w io.Writer, r io.Reader, pathPrefix string) error {
 	return nil
 }
 
+func (s *server) makeSecureHandler(iapAudience string) http.Handler {
+	insecureMux := http.NewServeMux()
+	insecureMux.HandleFunc("/", s.rootHandler)
+	insecureMux.HandleFunc("/health", s.healthHandler)
+	return iap.RequiredWithExceptions(iapAudience, insecureMux, []string{"/health"})
+}
+
 func main() {
-	// creates the in-cluster config
+	// https://cloud.google.com/iap/docs/signed-headers-howto#verifying_the_jwt_payload
+	iapAudience := flag.String("iapAudience", "", "Identity-Aware Proxy audience (aud) field (REQUIRED)")
+	flag.Parse()
+
+	// connect to the Kubernetes APIS
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		panic(err)
 	}
-	// creates the clientset
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		panic(err)
@@ -269,8 +284,7 @@ func main() {
 		panic(err)
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", s.rootHandler)
+	secureHandler := s.makeSecureHandler(*iapAudience)
 
 	port := os.Getenv(portEnvVar)
 	if port == "" {
@@ -280,7 +294,7 @@ func main() {
 
 	addr := ":" + port
 	log.Printf("listen addr %s (http://localhost:%s/)", addr, port)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.ListenAndServe(addr, secureHandler); err != nil {
 		panic(err)
 	}
 }
@@ -312,7 +326,7 @@ var rootTemplate = template.Must(template.New("root").Parse(`<!doctype html>
 <h2>Namespace {{.Name}}</h2>
 <ul>
 {{range .Services}}
-<li>{{.Name}} (IP: {{.ClusterIP}} TCP Port: {{.FirstTCPPort}}</li>
+<li>{{.Name}} (IP: {{.ClusterIP}} TCP Port: {{.FirstTCPPort}})</li>
 {{end}}
 </ul>
 {{end}}

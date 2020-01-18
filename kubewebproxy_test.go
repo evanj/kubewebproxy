@@ -135,6 +135,19 @@ func TestRewriteHTML(t *testing.T) {
 	}
 }
 
+func TestHealth(t *testing.T) {
+	fakeAPI := &fakeKubernetesAPIClient{}
+	kwp := &server{fakeAPI}
+	handler := kwp.makeSecureHandler("noaudience")
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Error("health check should return 200 OK", resp.Code)
+	}
+}
+
 const exampleHTML = `<html><body>
 <a href="./dir/relative1">relative1</a>
 <a href="/rootrelative">rootrelative</a>
