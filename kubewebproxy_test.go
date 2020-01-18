@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -39,6 +40,39 @@ func (k *fakeKubernetesAPIClient) get(namespace string, name string) (*corev1.Se
 	return nil, errors.NewNotFound(schema.GroupResource{}, name)
 }
 
+func TestRoot(t *testing.T) {
+	f := &fakeKubernetesAPIClient{}
+	f.services.Items = append(f.services.Items, corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "namespace",
+			Name:      "service",
+		},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{{
+				Name:     "portname",
+				Protocol: corev1.ProtocolTCP,
+				Port:     123,
+			}},
+		},
+	})
+	s := &server{f}
+
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	recorder := httptest.NewRecorder()
+	s.rootHandler(recorder, r)
+	if recorder.Code != http.StatusOK {
+		t.Error("expected status OK", recorder.Code)
+	}
+	if strings.Contains(recorder.Body.String(), "template:") {
+		t.Error("found template error in output")
+		t.Error(recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `href="/namespace/service/123/"`) {
+		t.Error("should have found link")
+		t.Error(recorder.Body.String())
+	}
+}
+
 func TestProxy(t *testing.T) {
 	static := &staticServer{}
 	testServer := httptest.NewServer(static)
@@ -60,7 +94,7 @@ func TestProxy(t *testing.T) {
 	})
 	kwp := &server{fakeAPI}
 
-	r, err := http.NewRequest(http.MethodGet, "/namespace/notfound/", nil)
+	r, err := http.NewRequest(http.MethodGet, "/namespace/notfound/123/", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +104,8 @@ func TestProxy(t *testing.T) {
 		t.Error("expected status NotFound", recorder.Code, recorder.Body.String())
 	}
 
-	r, err = http.NewRequest(http.MethodGet, "/namespace/service/", nil)
+	goodRoot := fmt.Sprintf("/namespace/service/%d/", testServerAddr.Port)
+	r, err = http.NewRequest(http.MethodGet, goodRoot+"subdir/", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,23 +114,31 @@ func TestProxy(t *testing.T) {
 	if recorder.Code != http.StatusResetContent {
 		t.Error("expected status ResetContent (205)", recorder.Code, recorder.Body.String())
 	}
-	if !strings.Contains(recorder.Body.String(), `"/namespace/service/rootrelative"`) {
+	expected := fmt.Sprintf(`"%srootrelative"`, goodRoot)
+	if !strings.Contains(recorder.Body.String(), expected) {
+		t.Errorf("output should contain %#v", expected)
+		t.Error(recorder.Body.String())
+	}
+	expected = fmt.Sprintf(`"%ssubdir/dir/relative1"`, goodRoot)
+	if !strings.Contains(recorder.Body.String(), expected) {
+		t.Errorf("output should contain %#v", expected)
 		t.Error(recorder.Body.String())
 	}
 }
 
 func TestPathRegexp(t *testing.T) {
-	matches := servicePattern.FindStringSubmatch("/namespace/service/")
-	if len(matches) != 4 {
+	matches := servicePattern.FindStringSubmatch("/namespace/service/123/")
+	if len(matches) != 5 {
 		t.Error(matches)
 	}
-	if !(matches[1] == "namespace" && matches[2] == "service" && matches[3] == "/") {
+	if !(matches[1] == "namespace" && matches[2] == "service" && matches[3] == "123" && matches[4] == "/") {
 		t.Error(matches)
 	}
 }
 
 func TestRewriteURL(t *testing.T) {
-	const pathPrefix = "/extra/path"
+	const rootPath = "/extra/path"
+	const relativePath = "/subdir/"
 	type testData struct {
 		input    string
 		expected string
@@ -104,21 +147,22 @@ func TestRewriteURL(t *testing.T) {
 		{"https://www.example.com/path", "https://www.example.com/path"},
 		{"/root", "/extra/path/root"},
 		{"/root/", "/extra/path/root/"},
-		{"./dir/relative", "/extra/path/dir/relative"},
-		{"relative.txt", "/extra/path/relative.txt"},
+		{"./dir/relative", "/extra/path/subdir/dir/relative"},
+		{"./dir/relative/", "/extra/path/subdir/dir/relative/"},
+		{"relative.txt", "/extra/path/subdir/relative.txt"},
 	}
 	for i, test := range tests {
-		output := rewriteURL(test.input, pathPrefix)
+		output := rewriteURL(test.input, rootPath, relativePath)
 		if output != test.expected {
-			t.Errorf("%d: rewriteURL(%#v, %#v)=%#v; expected %#v",
-				i, test.input, pathPrefix, output, test.expected)
+			t.Errorf("%d: rewriteURL(%#v, %#v, %#v)=%#v; expected %#v",
+				i, test.input, rootPath, relativePath, output, test.expected)
 		}
 	}
 }
 
 func TestRewriteHTML(t *testing.T) {
 	out := &bytes.Buffer{}
-	err := rewriteRelativeLinks(out, strings.NewReader(exampleHTML), "/extra/path")
+	err := rewriteRelativeLinks(out, strings.NewReader(exampleHTML), "/extra/path", "/subdir")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +170,7 @@ func TestRewriteHTML(t *testing.T) {
 	mustContain := []string{
 		`"https://www.example.com/absolute"`,
 		`"/extra/path/rootrelative"`,
-		`"/extra/path/dir/relative1"`,
+		`"/extra/path/subdir/dir/relative1"`,
 	}
 	for i, s := range mustContain {
 		if !strings.Contains(out.String(), s) {

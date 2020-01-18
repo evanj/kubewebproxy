@@ -13,6 +13,7 @@ import (
 	"path"
 	"regexp"
 	"sort"
+	"strconv"
 
 	"github.com/evanj/googlesignin/iap"
 	"golang.org/x/net/html"
@@ -28,7 +29,7 @@ const portEnvVar = "PORT"
 const defaultPort = "8080"
 const htmlMediaType = "text/html"
 
-var servicePattern = regexp.MustCompile(`^/([^/]+)/([^/]+)(.*)$`)
+var servicePattern = regexp.MustCompile(`^/([^/]+)/([^/]+)/([^/]+)(.*)$`)
 
 type serviceInfo interface {
 	list(limit int64) (*corev1.ServiceList, error)
@@ -64,8 +65,10 @@ func (s *server) healthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) rootHandler(w http.ResponseWriter, r *http.Request) {
-	email := iap.Email(r)
-	log.Printf("rootHandler user=%s %s %s", email, r.Method, r.URL.String())
+	// TODO: Add back email/user log once we add the test library to iap
+	// email := iap.Email(r)
+	// log.Printf("rootHandler user=%s %s %s", email, r.Method, r.URL.String())
+	log.Printf("rootHandler %s %s", r.Method, r.URL.String())
 	if r.Method != http.MethodGet {
 		http.Error(w, "wrong method", http.StatusMethodNotAllowed)
 		return
@@ -102,8 +105,17 @@ func (s *server) rootHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		lastNSData := &data.Namespaces[len(data.Namespaces)-1]
+
+		tcpPorts := []portTemplateData{}
+		for _, p := range s.Spec.Ports {
+			if p.Protocol == corev1.ProtocolTCP {
+				tcpPorts = append(tcpPorts, portTemplateData{p.Name, int(p.Port)})
+			}
+		}
 		lastNSData.Services = append(lastNSData.Services, serviceTemplateData{
-			Name: s.Name,
+			Name:      s.Name,
+			ClusterIP: s.Spec.ClusterIP,
+			TCPPorts:  tcpPorts,
 		})
 	}
 
@@ -123,7 +135,6 @@ func (s *server) proxyErrWrapper(w http.ResponseWriter, r *http.Request) {
 	}
 	err := s.proxy(w, r)
 	if err != nil {
-		log.Printf("WTF %s", err)
 		if errors.IsNotFound(err) {
 			http.NotFound(w, r)
 		} else {
@@ -143,25 +154,39 @@ func firstTCPPort(s *corev1.Service) (corev1.ServicePort, bool) {
 
 func (s *server) proxy(w http.ResponseWriter, r *http.Request) error {
 	matches := servicePattern.FindStringSubmatch(r.URL.Path)
-	if len(matches) != 4 {
+	if len(matches) != 5 {
 		return fmt.Errorf("bad path: %s", r.URL.Path)
 	}
-	namespace, service, path := matches[1], matches[2], matches[3]
-	log.Printf("ns=%s service=%s path=%s", namespace, service, path)
+	namespace, service, port, destPath := matches[1], matches[2], matches[3], matches[4]
+	log.Printf("ns=%s service=%s port=%s destPath=%s", namespace, service, port, destPath)
 
-	serviceMeta, err := s.services.get(namespace, service)
-	log.Printf("x, %s %s", serviceMeta, err)
+	parsedPort, err := strconv.ParseInt(port, 10, 32)
 	if err != nil {
 		return err
 	}
-	log.Printf("1, %s", serviceMeta)
 
-	tcpPort, ok := firstTCPPort(serviceMeta)
-	if !ok {
-		return fmt.Errorf("no TCP ports found")
+	serviceMeta, err := s.services.get(namespace, service)
+	if err != nil {
+		return err
 	}
 
-	urlString := fmt.Sprintf("http://%s:%d%s", serviceMeta.Spec.ClusterIP, tcpPort.Port, path)
+	// check that this port actually exists and is a TCP port
+	found := false
+	for _, p := range serviceMeta.Spec.Ports {
+		if p.Port == int32(parsedPort) {
+			if p.Protocol != corev1.ProtocolTCP {
+				return fmt.Errorf("port %s %d does not use TCP protocol: %s",
+					p.Name, p.Port, p.Protocol)
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("port %d not found", parsedPort)
+	}
+
+	urlString := fmt.Sprintf("http://%s:%d%s", serviceMeta.Spec.ClusterIP, parsedPort, destPath)
 	log.Printf("proxying to %s", urlString)
 	// TODO: use httputil.ReverseProxy?
 	outR, err := http.NewRequest(http.MethodGet, urlString, nil)
@@ -193,9 +218,10 @@ func (s *server) proxy(w http.ResponseWriter, r *http.Request) error {
 		// into the incoming URL, since relative links would then "just work" without rewriting.
 		// However, Google Cloud Ingress's automatic TLS certificates do not support wildcard domains,
 		// so let's write a bit more code to make this easier to use
-		pathPrefix := fmt.Sprintf("/%s/%s", namespace, service)
-		log.Printf("rewriting relative URLs to add %s", pathPrefix)
-		err = rewriteRelativeLinks(w, resp.Body, pathPrefix)
+		rootPath := fmt.Sprintf("/%s/%s/%s", namespace, service, port)
+		relativePath := path.Dir(destPath)
+		log.Printf("rewriting relative URLs to root=%s relative=%s", rootPath, relativePath)
+		err = rewriteRelativeLinks(w, resp.Body, rootPath, relativePath)
 	} else {
 		// not text/html: pass through
 		_, err = io.Copy(w, resp.Body)
@@ -206,18 +232,29 @@ func (s *server) proxy(w http.ResponseWriter, r *http.Request) error {
 	return resp.Body.Close()
 }
 
-func rewriteURL(urlString string, pathPrefix string) string {
+// Rewrites URL string so that any absolute path references are based on rootPath, and any
+// relative references are based on rootPath + relativePath
+// this is NOT equivalent to url.ResolveReference since we want to prepend the path for root
+func rewriteURL(urlString string, rootPath string, relativePath string) string {
 	u, err := url.Parse(urlString)
 	if err != nil {
 		log.Printf("warning: skipping invalid URL: %s: %s", urlString, err.Error())
 		return urlString
 	}
-	// this is NOT equivalent to ResolveReference since we want to prepend the path
 	if u.IsAbs() {
+		// absolute links to other hosts
 		return urlString
 	}
+
 	origPath := u.Path
-	u.Path = path.Join(pathPrefix, u.Path)
+	if origPath[0] == '/' {
+		// absolute: rewrite to rootPath
+		u.Path = path.Join(rootPath, u.Path)
+	} else {
+		// relative
+		u.Path = path.Join(rootPath, relativePath, u.Path)
+	}
+
 	// ensure we keep the same trailing slashes
 	if origPath[len(origPath)-1] == '/' && u.Path[len(u.Path)-1] != '/' {
 		u.Path += "/"
@@ -225,8 +262,8 @@ func rewriteURL(urlString string, pathPrefix string) string {
 	return u.String()
 }
 
-// Rewrites all relative links in the HTML document in r to start with pathPrefix.
-func rewriteRelativeLinks(w io.Writer, r io.Reader, pathPrefix string) error {
+// Rewrites all relative links in the HTML document in r to start with root + relative paths.
+func rewriteRelativeLinks(w io.Writer, r io.Reader, rootPath string, relativePath string) error {
 	tokenizer := html.NewTokenizer(r)
 	for {
 		tokenType := tokenizer.Next()
@@ -240,7 +277,9 @@ func rewriteRelativeLinks(w io.Writer, r io.Reader, pathPrefix string) error {
 		if t.DataAtom == atom.A {
 			for i, attr := range t.Attr {
 				if attr.Key == "href" {
-					t.Attr[i].Val = rewriteURL(attr.Val, pathPrefix)
+					newURL := rewriteURL(attr.Val, rootPath, relativePath)
+					log.Printf("rewriting %s -> %s", attr.Val, newURL)
+					t.Attr[i].Val = newURL
 				}
 			}
 		}
@@ -308,10 +347,15 @@ type namespaceTemplateData struct {
 	Services []serviceTemplateData
 }
 
+type portTemplateData struct {
+	Name string
+	Port int
+}
+
 type serviceTemplateData struct {
-	Name         string
-	ClusterIP    string
-	FirstTCPPort int
+	Name      string
+	ClusterIP string
+	TCPPorts  []portTemplateData
 }
 
 var rootTemplate = template.Must(template.New("root").Parse(`<!doctype html>
@@ -322,11 +366,17 @@ var rootTemplate = template.Must(template.New("root").Parse(`<!doctype html>
 <p>Proxies requests into a Kubernetes cluster.</p>
 <h2>WARNING: This can be a dangerous security hole</h2>
 
-{{range .Namespaces}}
-<h2>Namespace {{.Name}}</h2>
+{{range $namespace := .Namespaces}}
+<h2>Namespace {{$namespace.Name}}</h2>
 <ul>
-{{range .Services}}
-<li>{{.Name}} (IP: {{.ClusterIP}} TCP Port: {{.FirstTCPPort}})</li>
+{{range $service := $namespace.Services}}
+<li>{{$service.Name}} 
+	{{if $service.TCPPorts}}
+		<em>TCP Ports</em>: 
+		{{range $port := $service.TCPPorts}}
+			[<a href="/{{$namespace.Name}}/{{$service.Name}}/{{$port.Port}}/">{{$port.Name}} {{$port.Port}}</a>]
+		{{end}}
+	{{end}}</li>
 {{end}}
 </ul>
 {{end}}
