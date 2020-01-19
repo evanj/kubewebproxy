@@ -87,6 +87,10 @@ func TestProxy(t *testing.T) {
 		},
 		Spec: corev1.ServiceSpec{
 			Ports: []corev1.ServicePort{{
+				Protocol: corev1.ProtocolUDP,
+				Name:     "udp-donotdisplay",
+				Port:     int32(testServerAddr.Port),
+			}, {
 				Protocol: corev1.ProtocolTCP,
 				Port:     int32(testServerAddr.Port),
 			}},
