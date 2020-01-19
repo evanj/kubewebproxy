@@ -65,6 +65,11 @@ func (s *server) healthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) rootHandler(w http.ResponseWriter, r *http.Request) {
+	if servicePattern.MatchString(r.URL.Path) {
+		s.proxyErrWrapper(w, r)
+		return
+	}
+
 	// TODO: Add back email/user log once we add the test library to iap
 	// email := iap.Email(r)
 	// log.Printf("rootHandler user=%s %s %s", email, r.Method, r.URL.String())
@@ -138,18 +143,10 @@ func (s *server) proxyErrWrapper(w http.ResponseWriter, r *http.Request) {
 		if errors.IsNotFound(err) {
 			http.NotFound(w, r)
 		} else {
+			log.Printf("proxy error: %s", err.Error())
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 	}
-}
-
-func firstTCPPort(s *corev1.Service) (corev1.ServicePort, bool) {
-	for _, p := range s.Spec.Ports {
-		if p.Protocol == corev1.ProtocolTCP {
-			return p, true
-		}
-	}
-	return corev1.ServicePort{}, false
 }
 
 func (s *server) proxy(w http.ResponseWriter, r *http.Request) error {
@@ -170,14 +167,10 @@ func (s *server) proxy(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	// check that this port actually exists and is a TCP port
+	// make sure a matching TCP port exists
 	found := false
 	for _, p := range serviceMeta.Spec.Ports {
-		if p.Port == int32(parsedPort) {
-			if p.Protocol != corev1.ProtocolTCP {
-				return fmt.Errorf("port %s %d does not use TCP protocol: %s",
-					p.Name, p.Port, p.Protocol)
-			}
+		if p.Port == int32(parsedPort) && p.Protocol == corev1.ProtocolTCP {
 			found = true
 			break
 		}
