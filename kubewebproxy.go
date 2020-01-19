@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"flag"
 	"fmt"
 	"html/template"
 	"io"
+	"io/ioutil"
 	"log"
 	"mime"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"path"
@@ -47,8 +51,28 @@ func (k *kubernetesAPIClient) get(namespace string, name string) (*corev1.Servic
 	return k.clientset.CoreV1().Services(namespace).Get(name, metav1.GetOptions{})
 }
 
+type origRequestData struct {
+	namespace string
+	service   string
+	port      int64
+	destPath  string
+}
+
+type origRequestDataContextKey struct{}
+
 type server struct {
-	services serviceInfo
+	services     serviceInfo
+	reverseProxy *httputil.ReverseProxy
+}
+
+func newServer(services serviceInfo) *server {
+	s := &server{services: services}
+	s.reverseProxy = &httputil.ReverseProxy{
+		// Director does nothing: we rewrite in proxy
+		Director:       func(*http.Request) {},
+		ModifyResponse: s.proxyRewriter,
+	}
+	return s
 }
 
 func (s *server) checkPermissions() error {
@@ -179,50 +203,55 @@ func (s *server) proxy(w http.ResponseWriter, r *http.Request) error {
 		return fmt.Errorf("port %d not found", parsedPort)
 	}
 
-	urlString := fmt.Sprintf("http://%s:%d%s", serviceMeta.Spec.ClusterIP, parsedPort, destPath)
-	log.Printf("proxying to %s", urlString)
-	// TODO: use httputil.ReverseProxy?
-	outR, err := http.NewRequest(http.MethodGet, urlString, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := http.DefaultClient.Do(outR)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
+	r.URL.Scheme = "http"
+	r.URL.Host = fmt.Sprintf("%s:%d", serviceMeta.Spec.ClusterIP, parsedPort)
+	r.URL.Path = destPath
+	log.Printf("proxying to %s", r.URL.String())
 
-	// copy out the headers and status code
-	for k, vList := range resp.Header {
-		for _, v := range vList {
-			w.Header().Set(k, v)
-		}
-	}
-	w.WriteHeader(resp.StatusCode)
+	// bit of a hack: store the original request data in the request context so the ReverseProxy
+	// response rewriter can access it
+	origData := origRequestData{namespace, service, parsedPort, destPath}
+	rCtxWithData := context.WithValue(r.Context(), origRequestDataContextKey{}, origData)
+	r2 := r.WithContext(rCtxWithData)
 
+	s.reverseProxy.ServeHTTP(w, r2)
+	return nil
+}
+
+func (s *server) proxyRewriter(resp *http.Response) error {
 	// TODO: check params for charset
 	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if err != nil {
-		log.Printf("warning: could not parse Content-Type: %s = %s", resp.Header.Get("Content-Type"), err.Error())
+		log.Printf("warning: could not parse Content-Type: %s = %s; not rewriting links",
+			resp.Header.Get("Content-Type"), err.Error())
 	}
-	if mediaType == htmlMediaType {
-		// rewrite links so they work
-		// TODO: it would be better to use a wildcard domain to put the namespace/service name
-		// into the incoming URL, since relative links would then "just work" without rewriting.
-		// However, Google Cloud Ingress's automatic TLS certificates do not support wildcard domains,
-		// so let's write a bit more code to make this easier to use
-		rootPath := fmt.Sprintf("/%s/%s/%s", namespace, service, port)
-		relativePath := path.Dir(destPath)
-		log.Printf("rewriting relative URLs to root=%s relative=%s", rootPath, relativePath)
-		err = rewriteRelativeLinks(w, resp.Body, rootPath, relativePath)
-	} else {
-		// not text/html: pass through
-		_, err = io.Copy(w, resp.Body)
+	if mediaType != htmlMediaType {
+		return nil
 	}
+
+	origData, ok := resp.Request.Context().Value(origRequestDataContextKey{}).(origRequestData)
+	if !ok {
+		return fmt.Errorf("proxy error: original request data not found in context")
+	}
+
+	// Proxying an HTML document: rewrite links so they work
+	// TODO: it would be better to use a wildcard domain to put the namespace/service name
+	// into the incoming URL, since relative links would then "just work" without rewriting.
+	// However, Google Cloud Ingress's automatic TLS certificates do not support wildcard domains,
+	// so let's write a bit more code to make this easier to use
+	rootPath := fmt.Sprintf("/%s/%s/%d", origData.namespace, origData.service, origData.port)
+	relativePath := path.Dir(origData.destPath)
+	log.Printf("rewriting relative URLs to root=%s relative=%s", rootPath, relativePath)
+
+	buf := &bytes.Buffer{}
+	err = rewriteRelativeLinks(buf, resp.Body, rootPath, relativePath)
 	if err != nil {
 		return err
 	}
-	return resp.Body.Close()
+
+	resp.Header.Del("Content-Length")
+	resp.Body = ioutil.NopCloser(buf)
+	return nil
 }
 
 // Rewrites URL string so that any absolute path references are based on rootPath, and any
@@ -310,7 +339,7 @@ func main() {
 	// crash early if we do not have the correct permission
 	// TODO: This is probably bad: we will crash on startup if the master is down, but it
 	// does make it easier to debug permissions errors. Figure out a better option?
-	s := &server{&kubernetesAPIClient{clientset}}
+	s := newServer(&kubernetesAPIClient{clientset})
 	err = s.checkPermissions()
 	if err != nil {
 		panic(err)
