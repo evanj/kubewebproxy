@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -55,7 +56,7 @@ func TestRoot(t *testing.T) {
 			}},
 		},
 	})
-	s := &server{f}
+	s := newServer(f)
 
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	recorder := httptest.NewRecorder()
@@ -86,6 +87,7 @@ func TestProxy(t *testing.T) {
 			Name:      "service",
 		},
 		Spec: corev1.ServiceSpec{
+			ClusterIP: "localhost",
 			Ports: []corev1.ServicePort{{
 				Protocol: corev1.ProtocolUDP,
 				Name:     "udp-donotdisplay",
@@ -96,7 +98,7 @@ func TestProxy(t *testing.T) {
 			}},
 		},
 	})
-	kwp := &server{fakeAPI}
+	kwp := newServer(fakeAPI)
 
 	r, err := http.NewRequest(http.MethodGet, "/namespace/notfound/123/", nil)
 	if err != nil {
@@ -127,6 +129,18 @@ func TestProxy(t *testing.T) {
 	if !strings.Contains(recorder.Body.String(), expected) {
 		t.Errorf("output should contain %#v", expected)
 		t.Error(recorder.Body.String())
+	}
+
+	// ensure content-length was rewritten correctly
+	if recorder.Header().Get("Content-Length") != "" {
+		contentLength, err := strconv.Atoi(recorder.Header().Get("Content-Length"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if contentLength != recorder.Body.Len() {
+			t.Errorf("Content-Length=%d; Body length was %d: must match",
+				contentLength, recorder.Body.Len())
+		}
 	}
 }
 
@@ -185,7 +199,7 @@ func TestRewriteHTML(t *testing.T) {
 
 func TestHealth(t *testing.T) {
 	fakeAPI := &fakeKubernetesAPIClient{}
-	kwp := &server{fakeAPI}
+	kwp := newServer(fakeAPI)
 	handler := kwp.makeSecureHandler("noaudience")
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
