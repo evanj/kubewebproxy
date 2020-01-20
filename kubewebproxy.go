@@ -158,10 +158,6 @@ func (s *server) rootHandler(w http.ResponseWriter, r *http.Request) {
 // proxies a request
 func (s *server) proxyErrWrapper(w http.ResponseWriter, r *http.Request) {
 	log.Printf("proxy %s %s", r.Method, r.URL.String())
-	if r.Method != http.MethodGet {
-		http.Error(w, "wrong method", http.StatusMethodNotAllowed)
-		return
-	}
 	err := s.proxy(w, r)
 	if err != nil {
 		if errors.IsNotFound(err) {
