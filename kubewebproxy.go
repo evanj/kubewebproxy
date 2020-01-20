@@ -267,6 +267,10 @@ func rewriteURL(urlString string, rootPath string, relativePath string) string {
 		// absolute links to other hosts
 		return urlString
 	}
+	if u.Path == "" {
+		// links with anchors "#anchor", probably others like queries "?k=v"
+		return urlString
+	}
 
 	origPath := u.Path
 	if origPath[0] == '/' {

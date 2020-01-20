@@ -168,6 +168,7 @@ func TestRewriteURL(t *testing.T) {
 		{"./dir/relative", "/extra/path/subdir/dir/relative"},
 		{"./dir/relative/", "/extra/path/subdir/dir/relative/"},
 		{"relative.txt", "/extra/path/subdir/relative.txt"},
+		{"#anchor", "#anchor"},
 	}
 	for i, test := range tests {
 		output := rewriteURL(test.input, rootPath, relativePath)
