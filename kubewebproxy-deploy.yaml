@@ -38,6 +38,9 @@ spec:
     enabled: true
     oauthclientCredentials:
       secretName: iap-secret
+  # wait for 2 mins for long-lived connections e.g. pprof profile
+  # https://cloud.google.com/kubernetes-engine/docs/how-to/configure-backend-service#creating_a_backendconfig
+  timeoutSec: 120
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -59,7 +62,7 @@ spec:
       serviceAccountName: kubewebproxy
       containers:
       - name: kubewebproxy
-        image: us.gcr.io/gosignin-demo/kubewebproxy:debug5
+        image: us.gcr.io/gosignin-demo/kubewebproxy:debug15
         args: ["--iapAudience=/projects/660565085864/global/backendServices/5821046762714885080"]
 
         # necessary since / requires IAP authentication
