@@ -306,7 +306,15 @@ func rewriteRelativeLinks(w io.Writer, r io.Reader, rootPath string, relativePat
 			}
 		}
 
-		_, err := w.Write([]byte(t.String()))
+		// t.String() incorrectly escapes <script> content
+		// https://github.com/golang/go/issues/7929
+		var content string
+		if tokenType == html.TextToken {
+			content = t.Data
+		} else {
+			content = t.String()
+		}
+		_, err := w.Write([]byte(content))
 		if err != nil {
 			return err
 		}
