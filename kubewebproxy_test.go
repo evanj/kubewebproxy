@@ -189,6 +189,8 @@ func TestRewriteHTML(t *testing.T) {
 		`"https://www.example.com/absolute"`,
 		`"/extra/path/rootrelative"`,
 		`"/extra/path/subdir/dir/relative1"`,
+		// Checks for https://github.com/golang/go/issues/7929
+		`"use strict";`,
 	}
 	for i, s := range mustContain {
 		if !strings.Contains(out.String(), s) {
@@ -213,4 +215,12 @@ func TestHealth(t *testing.T) {
 const exampleHTML = `<html><body>
 <a href="./dir/relative1">relative1</a>
 <a href="/rootrelative">rootrelative</a>
-<a href="https://www.example.com/absolute">absolute</a></body></html>`
+<a href="https://www.example.com/absolute">absolute</a>
+<form method="post" action="/root/post">
+<script>
+function initPanAndZoom(svg, clickHandler) {
+	// x/net/html has a bug when printing scripts: https://github.com/golang/go/issues/7929
+  "use strict";
+}
+</script>
+</body></html>`
