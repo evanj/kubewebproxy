@@ -215,6 +215,21 @@ func (s *server) proxy(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (s *server) proxyRewriter(resp *http.Response) error {
+	origData, ok := resp.Request.Context().Value(origRequestDataContextKey{}).(origRequestData)
+	if !ok {
+		return fmt.Errorf("proxy error: original request data not found in context")
+	}
+	rootPath := fmt.Sprintf("/%s/%s/%d", origData.namespace, origData.service, origData.port)
+	relativePath := path.Dir(origData.destPath)
+
+	// rewrite the location header
+	const locationHeader = "Location"
+	if resp.Header.Get(locationHeader) != "" {
+		newLocation := rewriteURL(resp.Header.Get(locationHeader), rootPath, relativePath)
+		log.Printf("proxy rewrote Location: %#v -> %#v", resp.Header.Get(locationHeader), newLocation)
+		resp.Header.Set(locationHeader, newLocation)
+	}
+
 	// TODO: check params for charset
 	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if err != nil {
@@ -225,19 +240,13 @@ func (s *server) proxyRewriter(resp *http.Response) error {
 		return nil
 	}
 
-	origData, ok := resp.Request.Context().Value(origRequestDataContextKey{}).(origRequestData)
-	if !ok {
-		return fmt.Errorf("proxy error: original request data not found in context")
-	}
-
 	// Proxying an HTML document: rewrite links so they work
 	// TODO: it would be better to use a wildcard domain to put the namespace/service name
 	// into the incoming URL, since relative links would then "just work" without rewriting.
 	// However, Google Cloud Ingress's automatic TLS certificates do not support wildcard domains,
 	// so let's write a bit more code to make this easier to use
-	rootPath := fmt.Sprintf("/%s/%s/%d", origData.namespace, origData.service, origData.port)
-	relativePath := path.Dir(origData.destPath)
-	log.Printf("rewriting relative URLs to root=%s relative=%s", rootPath, relativePath)
+
+	log.Printf("rewriting HTML paths to root=%s relative=%s", rootPath, relativePath)
 
 	buf := &bytes.Buffer{}
 	err = rewriteRelativeLinks(buf, resp.Body, rootPath, relativePath)
