@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path"
 	"strconv"
 	"strings"
 	"testing"
@@ -16,9 +17,17 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
+const testRedirectPath = "/redirect"
+const testRedirectDest = "/other"
+
 type staticServer struct{}
 
 func (s *staticServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == testRedirectPath {
+		http.Redirect(w, r, testRedirectDest, http.StatusSeeOther)
+		return
+	}
+
 	// return an unusual status to ensure we are proxying it
 	w.Header().Set("contex-type", "text/html; charset=UTF-8")
 	w.WriteHeader(http.StatusResetContent)
@@ -111,10 +120,7 @@ func TestProxy(t *testing.T) {
 	}
 
 	goodRoot := fmt.Sprintf("/namespace/service/%d/", testServerAddr.Port)
-	r, err = http.NewRequest(http.MethodGet, goodRoot+"subdir/", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	r = httptest.NewRequest(http.MethodGet, goodRoot+"subdir/", nil)
 	recorder = httptest.NewRecorder()
 	kwp.proxyErrWrapper(recorder, r)
 	if recorder.Code != http.StatusResetContent {
@@ -141,6 +147,19 @@ func TestProxy(t *testing.T) {
 			t.Errorf("Content-Length=%d; Body length was %d: must match",
 				contentLength, recorder.Body.Len())
 		}
+	}
+
+	// test a request that should be redirected
+	r = httptest.NewRequest(http.MethodGet, path.Join(goodRoot, testRedirectPath), nil)
+	recorder = httptest.NewRecorder()
+	kwp.proxyErrWrapper(recorder, r)
+	if recorder.Code != http.StatusSeeOther {
+		t.Error("expected status SeeOther (303)", recorder.Code, recorder.Body.String())
+	}
+	expected = path.Join(goodRoot, testRedirectDest)
+	location := recorder.Header().Get("Location")
+	if location != expected {
+		t.Errorf("Location header should be rewritten to %#v; was %#v", expected, location)
 	}
 }
 
