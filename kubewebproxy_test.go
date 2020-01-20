@@ -190,6 +190,7 @@ func TestRewriteHTML(t *testing.T) {
 		`"https://www.example.com/absolute"`,
 		`"/extra/path/rootrelative"`,
 		`"/extra/path/subdir/dir/relative1"`,
+		`"/extra/path/root/post"`,
 		// Checks for https://github.com/golang/go/issues/7929
 		`"use strict";`,
 	}

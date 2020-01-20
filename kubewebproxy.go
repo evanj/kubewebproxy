@@ -288,6 +288,12 @@ func rewriteURL(urlString string, rootPath string, relativePath string) string {
 	return u.String()
 }
 
+// maps tag to URL attribute that should be rewritten by rewriteRelativeLinks
+var attrRewrites = map[atom.Atom]string{
+	atom.A:    "href",
+	atom.Form: "action",
+}
+
 // Rewrites all relative links in the HTML document in r to start with root + relative paths.
 func rewriteRelativeLinks(w io.Writer, r io.Reader, rootPath string, relativePath string) error {
 	tokenizer := html.NewTokenizer(r)
@@ -300,11 +306,12 @@ func rewriteRelativeLinks(w io.Writer, r io.Reader, rootPath string, relativePat
 			return tokenizer.Err()
 		}
 		t := tokenizer.Token()
-		if t.DataAtom == atom.A {
+		rewriteAttr := attrRewrites[t.DataAtom]
+		if rewriteAttr != "" {
 			for i, attr := range t.Attr {
-				if attr.Key == "href" {
+				if attr.Key == rewriteAttr {
 					newURL := rewriteURL(attr.Val, rootPath, relativePath)
-					log.Printf("rewriting %s -> %s", attr.Val, newURL)
+					log.Printf("rewriting %s.%s=%#v -> %#v", t.DataAtom, attr.Key, attr.Val, newURL)
 					t.Attr[i].Val = newURL
 				}
 			}
