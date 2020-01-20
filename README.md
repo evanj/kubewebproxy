@@ -12,7 +12,7 @@ Since this is a potential security hole, Kube Web Proxy requires requests to hav
 
 ## Limitations
 
-The proxy has to rewrite paths, in order to add the namespace/service/port to the URL path. I have only used a few tiny web applications, so I'm certainly missing some rewrites that are required. This also means JavaScript that embeds paths will probably break. The solution is probably to rewrite the application to use relative paths. A better solution would be to use a wildcard domain, but that is not supported by Google's managed TLS certificates.
+The proxy has to rewrite paths, in order to add `/namespace/service/port` to the URL path. I have only used a few tiny web applications, so I'm certainly missing some rewrites that are required. Cookies will be shared between all services (TODO: rewrite the header to scope them to paths). This also means JavaScript that embeds paths will probably break. The solution is probably to rewrite the application to use relative paths. A better solution would be to use a wildcard domain, but that is not supported by Google's managed TLS certificates.
 
 
 ## Useful Documentation

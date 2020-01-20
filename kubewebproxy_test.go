@@ -131,7 +131,7 @@ func TestProxy(t *testing.T) {
 		t.Errorf("output should contain %#v", expected)
 		t.Error(recorder.Body.String())
 	}
-	expected = fmt.Sprintf(`"%ssubdir/dir/relative1"`, goodRoot)
+	expected = `"./dir/relative1"`
 	if !strings.Contains(recorder.Body.String(), expected) {
 		t.Errorf("output should contain %#v", expected)
 		t.Error(recorder.Body.String())
@@ -175,7 +175,6 @@ func TestPathRegexp(t *testing.T) {
 
 func TestRewriteURL(t *testing.T) {
 	const rootPath = "/extra/path"
-	const relativePath = "/subdir/"
 	type testData struct {
 		input    string
 		expected string
@@ -184,23 +183,23 @@ func TestRewriteURL(t *testing.T) {
 		{"https://www.example.com/path", "https://www.example.com/path"},
 		{"/root", "/extra/path/root"},
 		{"/root/", "/extra/path/root/"},
-		{"./dir/relative", "/extra/path/subdir/dir/relative"},
-		{"./dir/relative/", "/extra/path/subdir/dir/relative/"},
-		{"relative.txt", "/extra/path/subdir/relative.txt"},
+		{"./dir/relative", "./dir/relative"},
+		{"./dir/relative/", "./dir/relative/"},
+		{"relative.txt", "relative.txt"},
 		{"#anchor", "#anchor"},
 	}
 	for i, test := range tests {
-		output := rewriteURL(test.input, rootPath, relativePath)
+		output := rewriteURL(test.input, rootPath)
 		if output != test.expected {
-			t.Errorf("%d: rewriteURL(%#v, %#v, %#v)=%#v; expected %#v",
-				i, test.input, rootPath, relativePath, output, test.expected)
+			t.Errorf("%d: rewriteURL(%#v, %#v)=%#v; expected %#v",
+				i, test.input, rootPath, output, test.expected)
 		}
 	}
 }
 
 func TestRewriteHTML(t *testing.T) {
 	out := &bytes.Buffer{}
-	err := rewriteRelativeLinks(out, strings.NewReader(exampleHTML), "/extra/path", "/subdir")
+	err := rewriteAbsolutePathLinks(out, strings.NewReader(exampleHTML), "/extra/path")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +207,7 @@ func TestRewriteHTML(t *testing.T) {
 	mustContain := []string{
 		`"https://www.example.com/absolute"`,
 		`"/extra/path/rootrelative"`,
-		`"/extra/path/subdir/dir/relative1"`,
+		`"./dir/relative1"`,
 		`"/extra/path/root/post"`,
 		// Checks for https://github.com/golang/go/issues/7929
 		`"use strict";`,

@@ -220,12 +220,11 @@ func (s *server) proxyRewriter(resp *http.Response) error {
 		return fmt.Errorf("proxy error: original request data not found in context")
 	}
 	rootPath := fmt.Sprintf("/%s/%s/%d", origData.namespace, origData.service, origData.port)
-	relativePath := path.Dir(origData.destPath)
 
 	// rewrite the location header
 	const locationHeader = "Location"
 	if resp.Header.Get(locationHeader) != "" {
-		newLocation := rewriteURL(resp.Header.Get(locationHeader), rootPath, relativePath)
+		newLocation := rewriteURL(resp.Header.Get(locationHeader), rootPath)
 		log.Printf("proxy rewrote Location: %#v -> %#v", resp.Header.Get(locationHeader), newLocation)
 		resp.Header.Set(locationHeader, newLocation)
 	}
@@ -246,10 +245,10 @@ func (s *server) proxyRewriter(resp *http.Response) error {
 	// However, Google Cloud Ingress's automatic TLS certificates do not support wildcard domains,
 	// so let's write a bit more code to make this easier to use
 
-	log.Printf("rewriting HTML paths to root=%s relative=%s", rootPath, relativePath)
+	log.Printf("rewriting HTML paths to root=%s", rootPath)
 
 	buf := &bytes.Buffer{}
-	err = rewriteRelativeLinks(buf, resp.Body, rootPath, relativePath)
+	err = rewriteAbsolutePathLinks(buf, resp.Body, rootPath)
 	if err != nil {
 		return err
 	}
@@ -259,10 +258,8 @@ func (s *server) proxyRewriter(resp *http.Response) error {
 	return nil
 }
 
-// Rewrites URL string so that any absolute path references are based on rootPath, and any
-// relative references are based on rootPath + relativePath
-// this is NOT equivalent to url.ResolveReference since we want to prepend the path for root
-func rewriteURL(urlString string, rootPath string, relativePath string) string {
+// Rewrites URL string so that any absolute path references are based on rootPath.
+func rewriteURL(urlString string, rootPath string) string {
 	u, err := url.Parse(urlString)
 	if err != nil {
 		log.Printf("warning: skipping invalid URL: %s: %s", urlString, err.Error())
@@ -276,15 +273,14 @@ func rewriteURL(urlString string, rootPath string, relativePath string) string {
 		// links with anchors "#anchor", probably others like queries "?k=v"
 		return urlString
 	}
+	if u.Path[0] != '/' {
+		// relative path references: do not rewrite
+		// TODO: we might need to rewrite "../" references that could go back too far but skip for now
+		return urlString
+	}
 
 	origPath := u.Path
-	if origPath[0] == '/' {
-		// absolute: rewrite to rootPath
-		u.Path = path.Join(rootPath, u.Path)
-	} else {
-		// relative
-		u.Path = path.Join(rootPath, relativePath, u.Path)
-	}
+	u.Path = path.Join(rootPath, u.Path)
 
 	// ensure we keep the same trailing slashes
 	if origPath[len(origPath)-1] == '/' && u.Path[len(u.Path)-1] != '/' {
@@ -299,8 +295,8 @@ var attrRewrites = map[atom.Atom]string{
 	atom.Form: "action",
 }
 
-// Rewrites all relative links in the HTML document in r to start with root + relative paths.
-func rewriteRelativeLinks(w io.Writer, r io.Reader, rootPath string, relativePath string) error {
+// Rewrites all absolute paths in the HTML document in r to start with rootPath.
+func rewriteAbsolutePathLinks(w io.Writer, r io.Reader, rootPath string) error {
 	tokenizer := html.NewTokenizer(r)
 	for {
 		tokenType := tokenizer.Next()
@@ -315,7 +311,7 @@ func rewriteRelativeLinks(w io.Writer, r io.Reader, rootPath string, relativePat
 		if rewriteAttr != "" {
 			for i, attr := range t.Attr {
 				if attr.Key == rewriteAttr {
-					newURL := rewriteURL(attr.Val, rootPath, relativePath)
+					newURL := rewriteURL(attr.Val, rootPath)
 					log.Printf("rewriting %s.%s=%#v -> %#v", t.DataAtom, attr.Key, attr.Val, newURL)
 					t.Attr[i].Val = newURL
 				}
