@@ -1,6 +1,6 @@
 # Kube Web Proxy
 
-This is a hack to make it easy to connect to HTTP debug interfaces inside your Kubernetes cluster. You go to the proxy, and it shows you a list of pods/services in the cluster. You click the port you want, and it connects you. This makes it easy to access internal debugging interfaces. For example, you can access the (Go pprof web UI)[https://golang.org/pkg/net/http/pprof/] to collect profiling information. This is a bit like (Octant)[https://github.com/vmware-tanzu/octant], but runs in your cluster so it doesn't require installing anything, and it is very, very ugly.
+This is a hack to make it easy to connect to HTTP debug interfaces inside your Kubernetes cluster. You go to the proxy, and it shows you a list of pods/services in the cluster. You click the port you want, and it connects you. This makes it easy to access internal debugging interfaces. For example, you can access the [Go pprof web UI](https://golang.org/pkg/net/http/pprof/) to collect profiling information. This is a bit like the port-forwarding part of [Octant](https://github.com/vmware-tanzu/octant), but runs in your cluster so it doesn't require installing anything, and it is very, very ugly.
 
 ![Screenshot](./kubewebproxy-screenshot.png)
 
