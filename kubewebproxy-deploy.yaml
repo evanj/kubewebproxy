@@ -62,7 +62,7 @@ spec:
       serviceAccountName: kubewebproxy
       containers:
       - name: kubewebproxy
-        image: us.gcr.io/gosignin-demo/kubewebproxy:debug15
+        image: us.gcr.io/gosignin-demo/kubewebproxy:debug16
         args: ["--iapAudience=/projects/660565085864/global/backendServices/5821046762714885080"]
 
         # necessary since / requires IAP authentication
