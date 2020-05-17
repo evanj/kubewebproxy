@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/evanj/googlesignin/iap"
 	"golang.org/x/net/html"
@@ -32,6 +33,8 @@ import (
 const portEnvVar = "PORT"
 const defaultPort = "8080"
 const htmlMediaType = "text/html"
+const googleHealthCheckUserAgent = "googlehc/"
+const kubernetesHealthCheckUserAgent = "kube-probe/"
 
 var servicePattern = regexp.MustCompile(`^/([^/]+)/([^/]+)/([^/]+)(.*)$`)
 
@@ -82,10 +85,36 @@ func (s *server) checkPermissions() error {
 }
 
 func (s *server) healthHandler(w http.ResponseWriter, r *http.Request) {
-	log.Printf("health check URL=%s RemoteAddr=%s UserAgent=%s",
-		r.URL.String(), r.RemoteAddr, r.UserAgent())
+	log.Printf("health check %s URL=%s RemoteAddr=%s UserAgent=%s",
+		r.Method, r.URL.String(), r.RemoteAddr, r.UserAgent())
+	if r.Method != http.MethodGet {
+		http.Error(w, "invalid method", http.StatusMethodNotAllowed)
+		return
+	}
+
 	w.Header().Set("Content-Type", "text/plain;charset=utf-8")
 	w.Write([]byte("ok\n"))
+}
+
+var healthCheckUserAgents = []string{
+	googleHealthCheckUserAgent, kubernetesHealthCheckUserAgent,
+}
+
+// Returns true if this looks like a health check on /. GKE custom path health checks are very
+// fragile: its easier to support health checks on / for some user agents. See:
+// https://github.com/kubernetes/ingress-gce/issues/42
+func isRootHealthCheck(r *http.Request) bool {
+	if r.URL.Path != "/" {
+		return false
+	}
+
+	lowerUserAgent := strings.ToLower(r.UserAgent())
+	for _, healthCheckAgent := range healthCheckUserAgents {
+		if strings.Contains(lowerUserAgent, healthCheckAgent) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *server) rootHandler(w http.ResponseWriter, r *http.Request) {
@@ -338,7 +367,17 @@ func (s *server) makeSecureHandler(iapAudience string) http.Handler {
 	insecureMux := http.NewServeMux()
 	insecureMux.HandleFunc("/", s.rootHandler)
 	insecureMux.HandleFunc("/health", s.healthHandler)
-	return iap.RequiredWithExceptions(iapAudience, insecureMux, []string{"/health"})
+	secureMux := iap.Required(iapAudience, insecureMux)
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isRootHealthCheck(r) || r.URL.Path == "/health" {
+			s.healthHandler(w, r)
+			return
+		}
+
+		secureMux.ServeHTTP(w, r)
+	})
+	return handler
 }
 
 func main() {
