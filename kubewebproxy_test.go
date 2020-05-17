@@ -232,6 +232,35 @@ func TestHealth(t *testing.T) {
 	}
 }
 
+func TestIsRootHealthCheck(t *testing.T) {
+	type testCase struct {
+		userAgent string
+		path      string
+		expected  bool
+	}
+	testCases := []testCase{
+		{"kube-probe/1.13+", "/", true},
+		{"kube-probe/1.17", "/", true},
+		{"GoogleHC/1.0", "/", true},
+		{"xGoogleHC/2.1", "/", true},
+
+		{"GoogleHCx/2.1", "/", false},
+		// real chrome
+		{"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.117 Safari/537.36",
+			"/", false},
+		{"GoogleHC/1.0", "/other", false},
+	}
+	for i, test := range testCases {
+		r := httptest.NewRequest(http.MethodGet, test.path, nil)
+		r.Header.Set("User-Agent", test.userAgent)
+		result := isRootHealthCheck(r)
+		if result != test.expected {
+			t.Errorf("%d: isRootHealthCheck(User-Agent:%s Path:%s)=%t; expected %t",
+				i, test.userAgent, test.path, result, test.expected)
+		}
+	}
+}
+
 const exampleHTML = `<html><body>
 <a href="./dir/relative1">relative1</a>
 <a href="/rootrelative">rootrelative</a>
