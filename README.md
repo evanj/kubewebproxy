@@ -25,10 +25,14 @@ The proxy has to rewrite paths, in order to add `/namespace/service/port` to the
 ## Set up / using
 
 1. Build the container image and publish it.
-2. Configure IAP for your GKE cluster: https://cloud.google.com/iap/docs/enabling-kubernetes-howto
-3. Edit kubewebproxy-service.yaml and set `Image` and `--iapAudience` to the correct values for your cluster.
-4. kubectl apply -f kubewebproxy-service.yaml to configure the ingress, service, deployment, service account, GKE managed certificates, IAP, etc. This is unlikely to work without some edits.
-5. Access the ingress in your web browser.
+2. Configure IAP for your GKE cluster: https://cloud.google.com/iap/docs/enabling-kubernetes-howto. Most importantly, go to the [OAuth Credentals page](https://console.cloud.google.com/apis/credentials) and get the Client ID and secret, then create the required Kubernetes secret: `kubectl create secret generic iap-secret --from-literal=client_id=xxx.googleusercontent.com --from-literal=client_secret=...`
+3. Edit kubewebproxy-deploy.yaml and set `Image` to the value you published, and configure the Ingress host name to the name you want, then apply it.
+4. `kubectl describe ingress kubewebproxy` and get the IP address. Configure your DNS for the host name you want to point to it.
+5. Go to the IAP page, and copy the Signed Header JWT Audience for the ingress.
+6. Put it in the `--iapAudience` flag in `kubewebproxy-deploy.yaml` and apply it again.
+7. Access the ingress in your web browser. It should ideally work. First test the /health endpoint since it is public.
+
+*Note*: Health checking on a custom path is a huge pain. The pod needs to exist before the ingress, so I had to delete and re-create the ingress to get it to work.
 
 
 
