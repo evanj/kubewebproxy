@@ -39,19 +39,19 @@ const kubernetesHealthCheckUserAgent = "kube-probe/"
 var servicePattern = regexp.MustCompile(`^/([^/]+)/([^/]+)/([^/]+)(.*)$`)
 
 type serviceInfo interface {
-	list(limit int64) (*corev1.ServiceList, error)
-	get(namespace string, name string) (*corev1.Service, error)
+	list(ctx context.Context, limit int64) (*corev1.ServiceList, error)
+	get(ctx context.Context, namespace string, name string) (*corev1.Service, error)
 }
 
 type kubernetesAPIClient struct {
 	clientset *kubernetes.Clientset
 }
 
-func (k *kubernetesAPIClient) list(limit int64) (*corev1.ServiceList, error) {
-	return k.clientset.CoreV1().Services("").List(metav1.ListOptions{Limit: limit})
+func (k *kubernetesAPIClient) list(ctx context.Context, limit int64) (*corev1.ServiceList, error) {
+	return k.clientset.CoreV1().Services("").List(ctx, metav1.ListOptions{Limit: limit})
 }
-func (k *kubernetesAPIClient) get(namespace string, name string) (*corev1.Service, error) {
-	return k.clientset.CoreV1().Services(namespace).Get(name, metav1.GetOptions{})
+func (k *kubernetesAPIClient) get(ctx context.Context, namespace string, name string) (*corev1.Service, error) {
+	return k.clientset.CoreV1().Services(namespace).Get(ctx, name, metav1.GetOptions{})
 }
 
 type origRequestData struct {
@@ -78,9 +78,9 @@ func newServer(services serviceInfo) *server {
 	return s
 }
 
-func (s *server) checkPermissions() error {
+func (s *server) checkPermissions(ctx context.Context) error {
 	// attempt to list a single service to see if we have permission
-	_, err := s.services.list(1)
+	_, err := s.services.list(ctx, 1)
 	return err
 }
 
@@ -136,9 +136,11 @@ func (s *server) rootHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ctx := r.Context()
+
 	// get services in all the namespaces by omitting namespace
 	// Or specify namespace to get pods in particular namespace
-	services, err := s.services.list(0)
+	services, err := s.services.list(ctx, 0)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -211,7 +213,8 @@ func (s *server) proxy(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	serviceMeta, err := s.services.get(namespace, service)
+	ctx := r.Context()
+	serviceMeta, err := s.services.get(ctx, namespace, service)
 	if err != nil {
 		return err
 	}
@@ -399,7 +402,7 @@ func main() {
 	// TODO: This is probably bad: we will crash on startup if the master is down, but it
 	// does make it easier to debug permissions errors. Figure out a better option?
 	s := newServer(&kubernetesAPIClient{clientset})
-	err = s.checkPermissions()
+	err = s.checkPermissions(context.Background())
 	if err != nil {
 		panic(err)
 	}
