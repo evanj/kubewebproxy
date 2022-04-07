@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -38,10 +39,10 @@ type fakeKubernetesAPIClient struct {
 	services corev1.ServiceList
 }
 
-func (k *fakeKubernetesAPIClient) list(limit int64) (*corev1.ServiceList, error) {
+func (k *fakeKubernetesAPIClient) list(ctx context.Context, limit int64) (*corev1.ServiceList, error) {
 	return &k.services, nil
 }
-func (k *fakeKubernetesAPIClient) get(namespace string, name string) (*corev1.Service, error) {
+func (k *fakeKubernetesAPIClient) get(ctx context.Context, namespace string, name string) (*corev1.Service, error) {
 	for _, s := range k.services.Items {
 		if s.Namespace == namespace && s.Name == name {
 			return &s, nil
