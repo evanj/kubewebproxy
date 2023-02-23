@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"html/template"
 	"io"
-	"io/ioutil"
 	"log"
 	"mime"
 	"net/http"
@@ -286,7 +285,7 @@ func (s *server) proxyRewriter(resp *http.Response) error {
 	}
 
 	resp.Header.Del("Content-Length")
-	resp.Body = ioutil.NopCloser(buf)
+	resp.Body = io.NopCloser(buf)
 	return nil
 }
 
