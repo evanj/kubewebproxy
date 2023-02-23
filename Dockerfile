@@ -1,4 +1,4 @@
-FROM golang:1.18-bullseye AS cached_modules
+FROM golang:1.20.1-bullseye AS cached_modules
 COPY go.mod go.sum /go/src/kubewebproxy/
 WORKDIR /go/src/kubewebproxy
 # TODO: Figure out how to compile cached modules in a smarter way?
